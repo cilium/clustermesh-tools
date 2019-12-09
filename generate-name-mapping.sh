@@ -11,10 +11,11 @@ spec:
       hostAliases:
 EOF
 
-for IPFILE in $DIR/*.ips; do
-	for IP in $(cat $IPFILE); do
+for IPFILE in "$DIR"/*.ips; do
+	HOSTNAME=$(basename "$IPFILE")
+	while read -r IP; do
 		echo "      - ip: \"$IP\""
 		echo "        hostnames:"
-		echo "        - $(basename $IPFILE | sed -e s/.ips$//)"
-	done
+		echo "        - ${HOSTNAME/.ips/}"
+	done < "$IPFILE"
 done
