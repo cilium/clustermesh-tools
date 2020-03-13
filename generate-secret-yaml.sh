@@ -3,6 +3,9 @@
 set -e
 
 DIR="${OUTPUT:-config}"
+KUBECONFIG="${KUBECONFIG:+--kubeconfig=${KUBECONFIG}}"
+
+kubectl="kubectl $KUBECONFIG"
 
 for SECRET in "$DIR"/*; do
 	if [[ ! "$SECRET" =~ .ips$ ]]; then

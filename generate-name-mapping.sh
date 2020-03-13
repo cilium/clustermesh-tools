@@ -4,6 +4,8 @@ set -e
 
 DIR="${OUTPUT:-config}"
 
+ls ${DIR}/*.ips &> /dev/null || exit 0
+
 cat << EOF
 spec:
   template:
