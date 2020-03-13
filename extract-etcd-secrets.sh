@@ -5,9 +5,14 @@ set -e
 NAMESPACE="${NAMESPACE:-kube-system}"
 SERVICE_NAME="${SERVICE_NAME:-cilium-etcd-external}"
 DIR="${OUTPUT:-config}"
+KUBECONFIG="${KUBECONFIG:+--kubeconfig=${KUBECONFIG}}"
+CILIUM_CONFIG="${CILIUM_CONFIG:-cilium-config}"
+CILIUM_ETCD_SECRET="${CILIUM_ETCD_SECRET:-cilium-etcd-secrets}"
+
+kubectl="kubectl ${KUBECONFIG}"
 
 if [ -z "$CLUSTER_NAME" ]; then
-	CM_NAME=$(kubectl -n "$NAMESPACE" get cm cilium-config -o json | jq -r -c '.data."cluster-name"')
+	CM_NAME=$($kubectl -n "$NAMESPACE" get cm cilium-config -o json | jq -r -c '.data."cluster-name"')
 	if [[ "$CM_NAME" != "" && "$CM_NAME" != "default" ]]; then
 		echo "Derived cluster-name $CM_NAME from present ConfigMap"
 		CLUSTER_NAME="$CM_NAME"
@@ -20,22 +25,22 @@ fi
 
 mkdir -p "$DIR"
 
-SECRETS=$(kubectl -n "$NAMESPACE" get secret "cilium-etcd-secrets" -o json | jq -c '.data | to_entries[]')
+SECRETS=$($kubectl -n "$NAMESPACE" get secret "$CILIUM_ETCD_SECRET" -o json | jq -c '.data | to_entries[]')
 for SECRET in $SECRETS; do
   KEY=$(echo "$SECRET" | jq -r '.key')
   echo "$SECRET" | jq -r '.value' | base64 --decode > "$DIR/$CLUSTER_NAME.$KEY"
 done
 
-SERVICE=$(kubectl -n "$NAMESPACE" get svc "$SERVICE_NAME" -o json)
+SERVICE=$($kubectl -n "$NAMESPACE" get svc "$SERVICE_NAME" -o json)
 SERVICE_TYPE=$(echo "$SERVICE" | jq -r -c '.spec.type')
 
 case "$SERVICE_TYPE" in
 "NodePort")
 	# Grab the node's internal IPs.
-	IPS=$(kubectl -n "$NAMESPACE" get node \
+	IPS=$($kubectl -n "$NAMESPACE" get node \
 		-o jsonpath='{.items[*].status.addresses[?(@.type=="InternalIP")].address}' | tr ' ' '\n')
 	# Grab the node port on which etcd is exposed.
-	PORT=$(kubectl -n "$NAMESPACE" get svc "$SERVICE_NAME" \
+	PORT=$($kubectl -n "$NAMESPACE" get svc "$SERVICE_NAME" \
 		-o jsonpath='{.spec.ports[?(@.port==2379)].nodePort}')
 	;;
 "LoadBalancer")
@@ -62,20 +67,29 @@ case "$SERVICE_TYPE" in
 	;;
 esac
 
-SERVICE_NAME="${CLUSTER_NAME}.mesh.cilium.io"
+ETCD_CONFIG=$($kubectl -n "$NAMESPACE" get cm "$CILIUM_CONFIG" -o jsonpath='{.data.etcd-config}')
+rm -f "$DIR/$CLUSTER_NAME"
 
-cat > "$DIR/$CLUSTER_NAME" << EOF
+# If we are using addressable IPs then we can use the config as is.
+for ip in $IPS; do
+	[[ "$ETCD_CONFIG" =~ "$ip" ]] && echo "$ETCD_CONFIG" > "$DIR/$CLUSTER_NAME" && break
+done
+
+# Otherwise, use well known cilium subdomain
+if [ ! -e "$DIR/$CLUSTER_NAME" ]; then
+	SERVICE_NAME="${CLUSTER_NAME}.mesh.cilium.io"
+	echo "$IPS"  > "$DIR/${SERVICE_NAME}.ips"
+
+	cat > "$DIR/$CLUSTER_NAME" << EOF
 endpoints:
 - https://${SERVICE_NAME}:${PORT}
 EOF
 
-echo "$IPS"  > "$DIR/${SERVICE_NAME}.ips"
-
-cat >> "$DIR/$CLUSTER_NAME" << EOF
-ca-file: '/var/lib/cilium/clustermesh/${CLUSTER_NAME}.etcd-client-ca.crt'
-key-file: '/var/lib/cilium/clustermesh/${CLUSTER_NAME}.etcd-client.key'
-cert-file: '/var/lib/cilium/clustermesh/${CLUSTER_NAME}.etcd-client.crt'
-EOF
+	echo "$ETCD_CONFIG"                                                  \
+		| grep -E "(ca|key|cert)-file:"                              \
+		| sed "s|/.*/|/var/lib/cilium/clustermesh/${CLUSTER_NAME}.|" \
+	>> "$DIR/$CLUSTER_NAME"
+fi
 
 echo "===================================================="
 echo " WARNING: The directory $DIR contains private keys."
